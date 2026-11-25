@@ -187,15 +187,60 @@ Header `Server: nginx` và các security header (`X-Frame-Options`...) chứng t
 
 ## Part 3: Cloud Deployment
 
-### Exercise 3.1 / 3.2: Deploy agent Part 6
-- Nền tảng: 
-- URL: 
-- Screenshot: `screenshots/`
+### Exercise 3.1: Deploy agent Part 6 lên Railway
+- **Nền tảng:** Railway (theo K5: deploy luôn `06-lab-complete/`, không deploy app mẫu `03-cloud-deployment/`)
+- **URL:** https://agent-production-8d68483d.up.railway.app
+- **Chi tiết + biến môi trường:** xem [DEPLOYMENT.md](DEPLOYMENT.md)
+- **Screenshot:** `screenshots/dashboard.png`, `screenshots/running.png`, `screenshots/test.png`
+
+Các bước đã làm (trong `06-lab-complete/`):
+```bash
+railway login
+railway init --name day14-agent                 # tạo project, link thư mục
+railway add --database redis                    # Redis trên Railway
+railway add --service agent \
+  --variables 'REDIS_URL=${{Redis.REDIS_URL}}' \
+  --variables 'ENVIRONMENT=production' \
+  --variables 'RATE_LIMIT_PER_MINUTE=10' \
+  --variables 'DAILY_BUDGET_USD=1.0'
+railway variables --service agent --set "AGENT_API_KEY=$(openssl rand -hex 24)"   # secret ngẫu nhiên, không in ra
+railway up --service agent                      # build bằng Dockerfile theo railway.toml
+railway domain --service agent                  # tạo URL public
+```
+
+Tự kiểm 4 lệnh của CP6:
+```text
+/health            → 200
+/ready             → 200   {"ready":true,"redis":"ok"}
+/ask (không key)   → 401
+/ask (có key)      → 200
+```
 
 ### So sánh railway.toml và render.yaml
+| | `railway.toml` | `render.yaml` (Blueprint) |
+|---|---|---|
+| Định dạng | TOML | YAML |
+| Phạm vi | Chỉ cấu hình **build + deploy của 1 service** (`[build] builder = "DOCKERFILE"`, `[deploy] healthcheckPath`, restart policy) | Mô tả **cả hạ tầng**: nhiều service trong 1 file — web service `day14-agent` + Key Value (Redis) `day14-redis` |
+| Health check | `healthcheckPath = "/health"`, `healthcheckTimeout = 30` | `healthCheckPath: /health` |
+| Redis | Không khai báo trong file — tạo bằng `railway add --database redis` / dashboard | Khai báo luôn service `type: keyvalue` trong file |
+| Biến môi trường | Không nằm trong file; đặt bằng `railway variables` / dashboard. `REDIS_URL` tham chiếu `${{Redis.REDIS_URL}}` | Khai báo trong `envVars`; `REDIS_URL` dùng `fromService` (`property: connectionString`) để Render tự nối |
+| Secret | Đặt trực tiếp trên Railway (CLI/dashboard), không có trong repo | `AGENT_API_KEY` dùng `sync: false` → Render hỏi giá trị lúc tạo Blueprint (hoặc `generateValue: true` để Render tự sinh), không ghi giá trị trong file |
+| Cách deploy | `railway up` đẩy code từ máy (hoặc nối GitHub) | Push repo lên GitHub → Dashboard → New → Blueprint, Render đọc `render.yaml` |
+| Vị trí thư mục | Đặt trong `06-lab-complete/`, chạy `railway up` từ thư mục đó | Có `rootDir: 06-lab-complete` vì Blueprint đọc từ repo, Dockerfile nằm trong thư mục con |
+| PORT | Railway cấp `PORT`, Dockerfile đọc `${PORT:-8000}` | Render cũng cấp `PORT`, dùng chung Dockerfile |
 
+**Vì sao khác:** Railway tách "code config" (railway.toml) khỏi "hạ tầng" (tạo service, biến qua CLI/dashboard, nối bằng reference `${{...}}`); Render theo hướng Infrastructure-as-Code: một file Blueprint dựng toàn bộ stack (web + Redis + env) nên tái tạo được đầy đủ từ repo, đổi lại phải khai báo kỹ hơn (`rootDir`, `fromService`, `ipAllowList`). Cả hai đều không ghi secret trong file và đều dùng `/health` để biết deploy thành công.
+
+*Ghi chú:* khi chạy `railway init`, CLI 5.75 cảnh báo "Config as Code (railway.toml) is deprecated… Existing files keep working until 2026-12-01" — Railway đang chuyển sang `.railway/railway.ts`. Bài này vẫn dùng `railway.toml` vì script chấm yêu cầu.
 
 ### Exercise 3.3: Pipeline Cloud Run (cloudbuild.yaml + service.yaml)
+Pipeline CI/CD trong `03-cloud-deployment/production-cloud-run/cloudbuild.yaml` chạy khi push lên `main`, gồm 4 bước nối tiếp nhau bằng `waitFor`:
+1. **test** — trong image `python:3.11-slim`, cài requirements + pytest và chạy `pytest tests/`; test fail thì pipeline dừng, không build.
+2. **build** — build Docker image, gắn 2 tag `gcr.io/$PROJECT_ID/ai-agent:$COMMIT_SHA` và `:latest`, dùng `--cache-from :latest` để tận dụng layer cache.
+3. **push** — đẩy image lên Container Registry (`gcr.io`).
+4. **deploy** — `gcloud run deploy ai-agent` với image đúng `$COMMIT_SHA` ở `asia-southeast1`: public, 1–10 instance (min 1 để tránh cold start), 512Mi / 1 CPU, timeout 60s, `ENVIRONMENT=production`, `OPENAI_API_KEY` lấy từ **Secret Manager** (không hardcode).
+
+`service.yaml` mô tả cùng service dưới dạng IaC (Knative): autoscale 1–10 instance, mỗi instance tối đa 80 request đồng thời, liveness probe `GET /health`, startup probe `GET /ready`, `AGENT_API_KEY`/`OPENAI_API_KEY` lấy từ Secret Manager qua `secretKeyRef`.
 
 
 ## Part 4: API Security
@@ -533,3 +578,4 @@ Chạy đầy đủ (có Docker) trong `06-lab-complete/`: `python check_product
 | 4 | Nhờ Claude Code giải thích API key, JWT, rate limiter, cost guard và chạy test Part 4 (Ex 4.1–4.4) | Output 401/403/200/429 thật, giải thích thuật toán sliding window, cách làm cost guard bằng Redis | Tự đọc `auth.py`, `rate_limiter.py`, `cost_guard.py`; kiểm tra request 11 bị 429 khớp limit 10/phút; tự che token trước khi dán |
 | 5 | Nhờ Claude Code giải thích health/ready, graceful shutdown, stateless và chạy test Part 5 (Ex 5.1–5.5) | Output thật: request vẫn 200 khi gửi SIGTERM; 3 instance cùng phục vụ 1 session, history đủ 10 message; tắt 1 instance vẫn không lỗi | Tự đọc log server để thấy thứ tự `Shutting down` → `200 OK`; đối chiếu `served_by` với log `docker compose logs agent` |
 | 6 | Nhờ Claude Code hướng dẫn từng bước Part 6: đọc script chấm, đề xuất code cho config, log JSON, /health, /ready, auth, rate limiter Redis, cost guard, lifespan, Dockerfile, compose, railway.toml/render.yaml | Code từng file kèm giải thích; sau mỗi bước chạy thử bằng curl và `check_production_ready.py` | Đọc và duyệt từng đoạn trước khi sửa; tự kiểm tra 401/429/402/503 bằng curl, restart agent vẫn 429; chạy `check_production_ready.py` đầy đủ (không tham số) → PASS 12/12; không sửa script chấm |
+| 7 | Nhờ Claude Code hướng dẫn deploy Railway (CP6), viết `DEPLOYMENT.md`, so sánh `railway.toml`/`render.yaml`, tóm tắt pipeline Cloud Run (Ex 3.3) | Các lệnh Railway CLI (init, add redis, add agent + variables, up, domain), bảng so sánh, mô tả 4 bước pipeline | Tự đăng nhập Railway; tự chạy 4 lệnh tự kiểm CP6 (200/200/401/200) và chụp ảnh; key sinh ngẫu nhiên, chỉ nằm trên Railway; tự đọc `cloudbuild.yaml`, `service.yaml` để đối chiếu |
