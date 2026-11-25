@@ -26,6 +26,9 @@ RUN chown -R agent:agent /app
 USER agent
 
 ENV PATH=/home/agent/.local/bin:$PATH
+# Fix: user "agent" có HOME=/app (useradd -d /app) nên Python mặc định tìm thư viện --user ở
+# /app/.local → ModuleNotFoundError. Chỉ rõ thư mục thư viện đã copy từ builder:
+ENV PYTHONUSERBASE=/home/agent/.local
 ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
